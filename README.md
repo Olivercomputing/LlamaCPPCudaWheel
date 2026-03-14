@@ -16,7 +16,8 @@ The published distribution is:
 2. The workflow fetches the **latest release** from `ai-dock/llama.cpp-cuda`
    (or a specific tag you provide).
 3. All `.tar.gz` assets are downloaded and extracted into the wheel's package
-   data directory, organized by CUDA version.
+   data directory, preserving the top-level CUDA directory that already exists
+   inside each archive.
 4. A platform-tagged wheel (`py3-none-manylinux_2_34_x86_64`) is built.
 5. The workflow publishes:
    - a versioned GitHub release named `wheel-b<UPSTREAM_BUILD>`

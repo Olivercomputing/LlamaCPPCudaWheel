@@ -97,13 +97,10 @@ jobs:
           for archive in /tmp/assets/*.tar.gz; do
             echo "Extracting $(basename "$archive") ..."
 
-            # Derive a subdirectory name from the archive filename
-            # e.g. llama.cpp-b8192-cuda-12.8.tar.gz → cuda-12.8
-            base=$(basename "$archive" .tar.gz)
-            cuda_suffix=$(echo "$base" | grep -oP 'cuda-[\d.]+' || echo "$base")
-
-            mkdir -p "$DEST/$cuda_suffix"
-            tar -xzf "$archive" -C "$DEST/$cuda_suffix"
+            # Preserve the archive's own top-level directory structure
+            # (for example, a tarball rooted at cuda-12.8/ extracts to
+            # data/cuda-12.8/ rather than data/cuda-12.8/cuda-12.8/).
+            tar -xzf "$archive" -C "$DEST"
           done
 
           echo ""
