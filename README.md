@@ -4,7 +4,7 @@ A GitHub Actions pipeline that automatically repackages the pre-built
 [ai-dock/llama.cpp-cuda](https://github.com/ai-dock/llama.cpp-cuda) binary
 releases into a platform-specific Python wheel (`.whl`).
 
-The published distribution is:
+The published distribution is :
 
 - Package name: `llama-cpp-cuda-binaries`
 - Import name: `llama_cpp_cuda_binaries`
