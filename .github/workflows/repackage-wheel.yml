@@ -1,0 +1,370 @@
+name: Repackage llama.cpp-cuda as Python Wheel
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >
+          Specific release tag to package (e.g. b8192).
+          Leave blank to use the latest release.
+        required: false
+        default: ""
+
+permissions:
+  contents: write        # needed to create releases
+  pages: write           # needed to publish the simple index on GitHub Pages
+  id-token: write        # needed by GitHub Pages deployment
+
+jobs:
+  build-wheel:
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+
+    steps:
+      # ── 1. Checkout this repo ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ───────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build wheel setuptools
+
+      # ── 3. Resolve the target release tag ──────────────────────────────
+      - name: Resolve release tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api repos/ai-dock/llama.cpp-cuda/releases/latest --jq '.tag_name')
+            echo "Resolved latest tag: $TAG"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # ── 4. Check if we already published this version ──────────────────
+      - name: Check for existing release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="wheel-${{ steps.resolve.outputs.tag }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists – skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 5. Download upstream release assets ────────────────────────────
+      - name: Download release assets
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          echo "Downloading assets for ai-dock/llama.cpp-cuda @ $TAG"
+
+          mkdir -p /tmp/assets
+          cd /tmp/assets
+
+          # List all .tar.gz assets and download them
+          gh release download "$TAG" \
+            --repo ai-dock/llama.cpp-cuda \
+            --pattern '*.tar.gz' \
+            --skip-existing
+
+          echo "Downloaded assets:"
+          ls -lh /tmp/assets/
+
+      # ── 6. Extract every tarball into the package data directory ───────
+      - name: Extract tarballs
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          DEST="${{ github.workspace }}/src/llama_cpp_cuda_binaries/data"
+          mkdir -p "$DEST"
+
+          for archive in /tmp/assets/*.tar.gz; do
+            echo "Extracting $(basename "$archive") ..."
+
+            # Derive a subdirectory name from the archive filename
+            # e.g. llama.cpp-b8192-cuda-12.8.tar.gz → cuda-12.8
+            base=$(basename "$archive" .tar.gz)
+            cuda_suffix=$(echo "$base" | grep -oP 'cuda-[\d.]+' || echo "$base")
+
+            mkdir -p "$DEST/$cuda_suffix"
+            tar -xzf "$archive" -C "$DEST/$cuda_suffix"
+          done
+
+          echo ""
+          echo "Package data tree:"
+          find "$DEST" -maxdepth 2 -type f | head -60
+
+      # ── 7. Generate package metadata from the resolved tag ─────────────
+      - name: Generate package metadata
+        if: steps.check.outputs.exists == 'false'
+        id: metadata
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          # Strip leading 'b' to get a PEP-440 compatible version
+          VERSION=$(echo "$TAG" | sed 's/^b//')
+
+          echo "Building wheel for version $VERSION (tag $TAG)"
+
+          # Write the version so setup.py / pyproject.toml can read it
+          echo "$VERSION" > "${{ github.workspace }}/src/llama_cpp_cuda_binaries/VERSION"
+
+          # Write the upstream tag for reference
+          echo "$TAG" > "${{ github.workspace }}/src/llama_cpp_cuda_binaries/UPSTREAM_TAG"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # ── 8. Build the wheel ─────────────────────────────────────────────
+      - name: Build wheel
+        if: steps.check.outputs.exists == 'false'
+        run: python -m build --wheel --outdir dist/
+
+      - name: Show built wheel
+        if: steps.check.outputs.exists == 'false'
+        run: ls -lh dist/
+
+      - name: Capture wheel metadata
+        if: steps.check.outputs.exists == 'false'
+        id: wheel
+        run: |
+          WHEEL_PATH=$(ls dist/*.whl | head -1)
+          WHEEL_FILE=$(basename "$WHEEL_PATH")
+          WHEEL_SHA256=$(sha256sum "$WHEEL_PATH" | awk '{print $1}')
+
+          echo "wheel_path=$WHEEL_PATH" >> "$GITHUB_OUTPUT"
+          echo "wheel_file=$WHEEL_FILE" >> "$GITHUB_OUTPUT"
+          echo "wheel_sha256=$WHEEL_SHA256" >> "$GITHUB_OUTPUT"
+
+      # ── 9. Upload wheel as a workflow artifact ─────────────────────────
+      - name: Upload wheel artifact
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-cpp-cuda-wheel
+          path: dist/*.whl
+
+      # ── 10. Create a GitHub Release so anyone can download the wheel ───
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_TAG="${{ steps.resolve.outputs.tag }}"
+          RELEASE_TAG="wheel-${UPSTREAM_TAG}"
+          VERSION=$(cat "${{ github.workspace }}/src/llama_cpp_cuda_binaries/VERSION")
+
+          gh release create "$RELEASE_TAG" dist/*.whl \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "llama-cpp-cuda-binaries $VERSION" \
+            --notes "$(cat <<EOF
+          ## llama-cpp-cuda-binaries v${VERSION}
+
+          Python wheel containing pre-built **llama.cpp** binaries with CUDA support,
+          repackaged from [ai-dock/llama.cpp-cuda ${UPSTREAM_TAG}](https://github.com/ai-dock/llama.cpp-cuda/releases/tag/${UPSTREAM_TAG}).
+
+          ### Install
+
+          Download the \`.whl\` file below and install with:
+
+          \`\`\`bash
+          pip install llama_cpp_cuda_binaries-${VERSION}-py3-none-manylinux_2_34_x86_64.whl
+          \`\`\`
+
+          Or install directly from this release:
+
+          \`\`\`bash
+          pip install "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/$(ls dist/ | head -1)"
+          \`\`\`
+
+          ### Contents
+
+          The binaries are installed to the package's \`data/\` directory.
+          Use \`llama_cpp_cuda_binaries.bin_path()\` to locate them at runtime.
+          EOF
+          )"
+
+      # ── 11. Update the "wheel-latest" rolling release ──────────────────
+      - name: Update wheel-latest release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_TAG="${{ steps.resolve.outputs.tag }}"
+          VERSION=$(cat "${{ github.workspace }}/src/llama_cpp_cuda_binaries/VERSION")
+
+          # Delete the old wheel-latest release + tag if they exist
+          gh release delete wheel-latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --yes --cleanup-tag 2>/dev/null || true
+
+          # Create a fresh one with the same wheel
+          gh release create wheel-latest dist/*.whl \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "llama-cpp-cuda-binaries (latest: $VERSION)" \
+            --notes "$(cat <<EOF
+          ## Always-current wheel
+
+          This release always points to the **most recent** build.
+          Currently: **v${VERSION}** from upstream tag \`${UPSTREAM_TAG}\`.
+
+          ### Stable install URL
+
+          \`\`\`bash
+          pip install "https://github.com/${GITHUB_REPOSITORY}/releases/download/wheel-latest/$(ls dist/ | head -1)"
+          \`\`\`
+
+          > **Note:** The filename includes the version number, so it changes
+          > with each build. For a stable "latest" install command, use the
+          > GitHub Pages simple index described below.
+
+          ### Stable package index
+
+          \`\`\`bash
+          pip install --extra-index-url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/" llama-cpp-cuda-binaries
+          \`\`\`
+
+          If you want a fully pinned URL, use the versioned release
+          \`wheel-${UPSTREAM_TAG}\` instead. For scripting, you can also query
+          the direct asset URL via the GitHub API:
+
+          \`\`\`bash
+          # This prints the current latest wheel asset URL
+          curl -sL "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/wheel-latest" \
+            | jq -r '.assets[0].browser_download_url'
+          \`\`\`
+          EOF
+          )"
+
+      - name: Build simple index for GitHub Pages
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          SITE_DIR="${{ github.workspace }}/site"
+          SIMPLE_DIR="$SITE_DIR/simple/llama-cpp-cuda-binaries"
+          WHEEL_FILE="${{ steps.wheel.outputs.wheel_file }}"
+          WHEEL_SHA256="${{ steps.wheel.outputs.wheel_sha256 }}"
+          VERSION="${{ steps.metadata.outputs.version }}"
+          UPSTREAM_TAG="${{ steps.metadata.outputs.upstream_tag }}"
+          WHEEL_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/wheel-latest/${WHEEL_FILE}"
+
+          mkdir -p "$SIMPLE_DIR"
+
+          cat > "$SITE_DIR/index.html" <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>llama-cpp-cuda-binaries</title>
+          </head>
+          <body>
+            <h1>llama-cpp-cuda-binaries</h1>
+            <p>Install the latest wheel with:</p>
+            <pre>pip install --extra-index-url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/" llama-cpp-cuda-binaries</pre>
+            <p>Current upstream tag: ${UPSTREAM_TAG}</p>
+            <p>Current package version: ${VERSION}</p>
+          </body>
+          </html>
+          EOF
+
+          cat > "$SITE_DIR/simple/index.html" <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Simple Index</title>
+          </head>
+          <body>
+            <a href="llama-cpp-cuda-binaries/">llama-cpp-cuda-binaries</a>
+          </body>
+          </html>
+          EOF
+
+          cat > "$SIMPLE_DIR/index.html" <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>llama-cpp-cuda-binaries</title>
+          </head>
+          <body>
+            <a href="${WHEEL_URL}#sha256=${WHEEL_SHA256}" data-requires-python="&gt;=3.8">${WHEEL_FILE}</a>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      # ── 12. Prune old versioned releases ───────────────────────────────
+      - name: Prune old releases
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: 10
+        run: |
+          echo "Pruning versioned releases, keeping the $KEEP most recent..."
+
+          # List all releases tagged wheel-b*, sorted newest-first by creation date.
+          # Skip wheel-latest since that's managed separately.
+          RELEASES=$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --limit 200 \
+            --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("wheel-b"))] | sort_by(.createdAt) | reverse | .[].tagName')
+
+          COUNT=0
+          while IFS= read -r TAG; do
+            [ -z "$TAG" ] && continue
+            COUNT=$((COUNT + 1))
+            if [ "$COUNT" -gt "$KEEP" ]; then
+              echo "  Deleting old release: $TAG"
+              gh release delete "$TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --yes --cleanup-tag
+            else
+              echo "  Keeping release: $TAG"
+            fi
+          done <<< "$RELEASES"
+
+          echo "Done. Kept $((COUNT < KEEP ? COUNT : KEEP)) of $COUNT total versioned releases."
+
+      - name: Mark publication status
+        id: publish
+        if: always()
+        run: |
+          if [ "${{ steps.check.outputs.exists }}" = "false" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy-pages:
+    needs: build-wheel
+    if: needs.build-wheel.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

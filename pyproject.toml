@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llama-cpp-cuda-binaries"
+dynamic = ["version"]
+description = "Pre-built llama.cpp binaries with CUDA support, repackaged as a Python wheel."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/ai-dock/llama.cpp-cuda"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["llama_cpp_cuda_binaries"]
+
+[tool.setuptools.dynamic]
+version = {file = "src/llama_cpp_cuda_binaries/VERSION"}
+
+[tool.setuptools.package-data]
+llama_cpp_cuda_binaries = [
+    "VERSION",
+    "UPSTREAM_TAG",
+    "data/**/*",
+]
